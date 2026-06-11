@@ -553,11 +553,13 @@ async function _saveToFirestore(){
         pieceContent: String(log.pieceContent  || ''),
         note:         String(log.note || ''),
         media: (Array.isArray(log.media) ? log.media : [])
-          .filter(f => f && typeof f === 'object' && f.name && f.data)
+          .filter(f => f && typeof f === 'object' && f.name && (f.data || f.fileUrl))
           .map(f => ({
             name: String(f.name || ''),
             type: String(f.type || ''),
-            data: String(f.data || '')
+            data: String(f.data || ''),
+            fileUrl: String(f.fileUrl || ''),
+            storagePath: String(f.storagePath || '')
           }))
       }));
 
@@ -889,7 +891,7 @@ function renderMonthly(){
   const maxMin=Math.max(...scored.map(s=>s.min),1);
   const hofCards=sorted.slice(0,2).map((s,i)=>`<div class="hof-card ${['gold','silver'][i]}"><span class="hof-medal">${['🥇','🥈'][i]}</span><div class="hof-name">${s.name}</div><div class="hof-hours">${s.min>0?fmtMin(s.min):'기록 없음'}</div></div>`).join('');
   const barRows=scored.map(s=>{
-    const crown=s.min>=600?'👑':'　';
+    const crown=s.min>=420?'👑':'　';
     return `<div class="bar-row"><div class="bar-crown" style="width:18px;flex-shrink:0;font-size:16px;text-align:center;line-height:1.4;">${crown}</div><div class="bar-name">${s.name}</div><div class="bar-track"><div class="bar-fill" style="width:${Math.round(s.min/maxMin*100)}%;background:linear-gradient(90deg,${s.th.p2},${s.th.p3});"></div></div><div class="bar-val" style="font-size:11px;color:#999;font-weight:500;">${s.min>0?fmtMinEn(s.min):'-'}</div></div>`;
   }).join('');
   document.getElementById('monthlySection').innerHTML=`<div class="monthly-title">🏆 ${yr}년 ${parseInt(mo)}월 이달의 현황</div><div class="hof-row">${hofCards}</div><div class="monthly-bars-title">이달 연습 현황</div>${barRows}`;
@@ -1049,7 +1051,10 @@ function onMediaChange(k){
   });
   inp.value='';
 }
-function renderFMP(k){const p=document.getElementById('mediaPrev_'+k);if(!p)return;p.innerHTML=(formMediaFiles[k]||[]).map(f=>f.type&&f.type.startsWith('image/')?`<img src="${f.data}">`:`<span class="mp-file">${f.name}</span>`).join('');}
+function renderFMP(k){const p=document.getElementById('mediaPrev_'+k);if(!p)return;p.innerHTML=(formMediaFiles[k]||[]).map(f=>{
+    const src=f.fileUrl||f.data||'';
+    return f.type&&f.type.startsWith('image/')?`<img src="${src}">`:`<span class="mp-file">${f.name}</span>`;
+  }).join('');}
 
 function renderEditMediaPreview(ek, member){
   const p=document.getElementById('mediaPrev_'+ek);if(!p)return;
@@ -1115,7 +1120,7 @@ function buildMediaHTML(media,member,uid){
   const th=getTheme(member);
   return media.map((f,mi)=>{
     if(f.type&&f.type.startsWith('image/')){
-      return `<div class="img-wrap"><img src="${f.data}" onclick="openImgPrev('${member}','${uid}',${mi})" style="border:2px solid ${th.border};border-radius:10px;"><button class="img-del-btn" onclick="deleteMedia('${member}','${uid}',${mi})">✕</button></div>`;
+      return `<div class="img-wrap"><img src="${f.fileUrl||f.data}" onclick="openImgPrev('${member}','${uid}',${mi})" style="border:2px solid ${th.border};border-radius:10px;"><button class="img-del-btn" onclick="deleteMedia('${member}','${uid}',${mi})">✕</button></div>`;
     }
     let icon='📄';
     if(f.type==='application/pdf') icon='📄';
@@ -1197,7 +1202,7 @@ function renderMemberPage(member,openWeek){
   weekKeys.forEach(mon=>{const fb=feedbacks[mon]||'';const rteEl=document.getElementById(feedbackRteId(mon));if(rteEl&&fb)rteEl.innerHTML=fb;});
 }
 
-function openImgPrev(member,uid,mi){const r=db[member].logs.find(x=>x.uid===uid);const f=(r?.media||[])[mi];if(!f)return;openFilePreview(f.data,f.name);}
+function openImgPrev(member,uid,mi){const r=db[member].logs.find(x=>x.uid===uid);const f=(r?.media||[])[mi];if(!f)return;openFilePreview(f.fileUrl||f.data,f.name);}
 function toggleWeek(id){const b=document.getElementById(id),t=document.getElementById('toggle_'+id);if(!b)return;b.classList.toggle('open');if(t)t.classList.toggle('open');}
 function deleteMedia(member,uid,mi){
   customConfirm('이 파일을 삭제할까요?',()=>{
@@ -1236,15 +1241,68 @@ function cancelEdit(uid){
   const item=document.getElementById('li_'+uid);if(item)item.classList.remove('editing');
 }
 function collectLog(k,base){return{date:document.getElementById('date_'+k).value,totalMin:parseInt(document.getElementById('total_'+k).value)||0,scaleMin:parseInt(document.getElementById('scale_'+k).value)||0,scaleContent:document.getElementById('scaleContent_'+k).value.trim(),fingerMin:parseInt(document.getElementById('finger_'+k).value)||0,fingerContent:document.getElementById('fingerContent_'+k).value.trim(),pieceMin:parseInt(document.getElementById('piece_'+k).value)||0,pieceContent:document.getElementById('pieceContent_'+k).value.trim(),note:document.getElementById('note_'+k).value.trim(),media:[...(base||[]),...(formMediaFiles[k]||[])]};}
-function saveEdit(member,uid,mon){
+async function saveEdit(member,uid,mon){
   const ek='edit_'+uid;
   const idx=db[member].logs.findIndex(x=>x.uid===uid);if(idx<0)return;
   const r=collectLog(ek,[]);
-  r.media=formMediaFiles[ek]||[];
   if(!r.date||r.totalMin<=0){customAlert('날짜와 연습 시간을 확인해주세요.');return;}
+  // Upload any new base64 media to Storage, keep already-uploaded ones
+  const rawFiles=formMediaFiles[ek]||[];
+  if(rawFiles.length>0 && window._fb && window._fb.uploadToStorage){
+    const uploaded=[];
+    for(const f of rawFiles){
+      try{
+        if(f.data && f.data.startsWith('data:')){
+          const result=await window._fb.uploadToStorage(f.data, f.name, 'logs/'+member.replace(/\s/g,'_'));
+          uploaded.push({name:f.name,type:f.type,fileUrl:result.url,storagePath:result.path,data:''});
+        } else {
+          uploaded.push(f);
+        }
+      }catch(e){
+        console.error('File upload error:',e);
+        uploaded.push({name:f.name,type:f.type,fileUrl:f.fileUrl||'',storagePath:f.storagePath||'',data:''});
+      }
+    }
+    r.media=uploaded;
+  } else {
+    r.media=rawFiles;
+  }
   r.uid=uid;db[member].logs[idx]=r;save();renderMemberPage(member,mon);
 }
-function addLog(member){const k=member.replace(/\s/g,'');const r=collectLog(k,[]);if(!r.date||r.totalMin<=0){customAlert('날짜와 연습 시간을 입력해주세요.');return;}r.uid=newUid();db[member].logs.push(r);formMediaFiles[k]=[];save();renderMemberPage(member);}
+async function addLog(member){
+  const k=member.replace(/\s/g,'');
+  const r=collectLog(k,[]);
+  if(!r.date||r.totalMin<=0){customAlert('날짜와 연습 시간을 입력해주세요.');return;}
+  r.uid=newUid();
+  // Upload media files to Firebase Storage, store URLs
+  const rawFiles=formMediaFiles[k]||[];
+  if(rawFiles.length>0 && window._fb && window._fb.uploadToStorage){
+    const btn=document.querySelector('.add-btn');
+    if(btn){btn.disabled=true;btn.textContent='파일 업로드 중...';}
+    const uploaded=[];
+    for(const f of rawFiles){
+      try{
+        if(f.data && f.data.startsWith('data:')){
+          const result=await window._fb.uploadToStorage(f.data, f.name, 'logs/'+member.replace(/\s/g,'_'));
+          uploaded.push({name:f.name,type:f.type,fileUrl:result.url,storagePath:result.path,data:''});
+        } else {
+          uploaded.push(f);
+        }
+      }catch(e){
+        console.error('File upload error:',e);
+        uploaded.push({name:f.name,type:f.type,fileUrl:'',storagePath:'',data:''});
+      }
+    }
+    r.media=uploaded;
+    if(btn){btn.disabled=false;btn.textContent='✚ 연습 기록 추가';}
+  } else {
+    r.media=rawFiles;
+  }
+  db[member].logs.push(r);
+  formMediaFiles[k]=[];
+  save();
+  renderMemberPage(member);
+}
 function saveFeedback(member,mon){const rteEl=document.getElementById(feedbackRteId(mon));if(!rteEl)return;db[member].feedbacks[mon]=rteEl.innerHTML;save();renderMemberPage(member,mon);}
 
 // ── App initialization ──
