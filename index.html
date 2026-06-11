@@ -941,8 +941,18 @@ function openFilePreview(dataUrl, fileName, explicitType){
         dl.onclick=()=>window.open(dataUrl,'_blank');
         body.appendChild(dl);
         audio.onerror=()=>{
-          body.innerHTML=`<div style="text-align:center;padding:30px;color:#AAA;font-size:13px;">이 오디오 형식은 브라우저에서 재생할 수 없어요.<br>(녹음 앱 형식이 특수할 수 있어요)<br><br><a href="${dataUrl}" target="_blank" style="color:#C8671A;font-weight:700;">새 탭/다른 앱에서 열기 ↗</a></div>`;
+          const err=audio.error;
+          const codes={1:'재생 중단됨',2:'네트워크 오류',3:'디코딩 오류',4:'형식 미지원'};
+          const codeMsg=err?(codes[err.code]||('코드 '+err.code)):'알 수 없음';
+          body.innerHTML=`<div style="text-align:center;padding:30px;color:#888;font-size:13px;">
+            <div style="margin-bottom:8px;">🎵 ${fileName||'오디오'}</div>
+            <div style="color:#C8671A;margin-bottom:4px;">재생 오류: ${codeMsg}</div>
+            <div style="font-size:11px;color:#AAA;margin-bottom:12px;">형식: ${playType} · 크기: ${(blob.size/1024/1024).toFixed(1)}MB</div>
+            <a href="${dataUrl}" target="_blank" style="color:#C8671A;font-weight:700;">새 탭/다른 앱에서 열기 ↗</a>
+          </div>`;
         };
+        // Also log load progress for debugging
+        audio.onloadedmetadata=()=>{ console.log('audio metadata loaded, duration:', audio.duration); };
       }).catch(e=>{
         body.innerHTML=`<div style="text-align:center;padding:30px;color:#AAA;font-size:13px;">오디오를 불러올 수 없습니다.<br><br><a href="${dataUrl}" target="_blank" style="color:#C8671A;">새 탭에서 열기</a></div>`;
       });
