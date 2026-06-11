@@ -875,7 +875,7 @@ function downloadFile(dataUrl, fileName){
   }catch(e){alert('다운로드 중 오류가 발생했습니다.');}
 }
 
-function openFilePreview(dataUrl, fileName, explicitType){
+function openFilePreview(dataUrl, fileName, explicitType, storagePath){
   // mime detection: explicit type > data URL prefix > filename extension
   let mime=explicitType||'';
   if(!mime && dataUrl.startsWith('data:')){
@@ -911,30 +911,43 @@ function openFilePreview(dataUrl, fileName, explicitType){
       // base64 audio (short recordings) — play directly
       body.innerHTML=`<audio controls preload="auto" style="width:100%;margin-bottom:10px;"><source src="${dataUrl}" type="${mime}"></audio>`;
     } else {
-      // Storage URL — play directly via <audio> src (no fetch, avoids CORS issues).
-      // Firebase download URLs support HTTP range requests, so seeking works.
-      const audio=document.createElement('audio');
-      audio.controls=true; audio.preload='metadata';
-      audio.style.cssText='width:100%;margin-bottom:10px;';
-      audio.src=dataUrl;
-      body.innerHTML='';
-      body.appendChild(audio);
-      const dl=document.createElement('button');
-      dl.className='modal-btn-primary';dl.style.background='#C8671A';
-      dl.textContent='다운로드 ↓';
-      dl.onclick=()=>window.open(dataUrl,'_blank');
-      body.appendChild(dl);
-      audio.onerror=()=>{
-        const err=audio.error;
-        const codes={1:'재생 중단됨',2:'네트워크 오류(CORS)',3:'디코딩 오류',4:'형식 미지원'};
-        const codeMsg=err?(codes[err.code]||('코드 '+err.code)):'알 수 없음';
-        body.innerHTML=`<div style="text-align:center;padding:30px;color:#888;font-size:13px;">
-          <div style="margin-bottom:8px;">🎵 ${fileName||'오디오'}</div>
-          <div style="color:#C8671A;margin-bottom:12px;">재생 오류: ${codeMsg}</div>
-          <a href="${dataUrl}" target="_blank" style="color:#C8671A;font-weight:700;">새 탭/다른 앱에서 열기 ↗</a>
-        </div>`;
-      };
+      // Storage audio — use Firebase SDK getBlob() to bypass CORS entirely
+      body.innerHTML=`<div style="text-align:center;padding:24px;color:#888;font-size:13px;">🎵 오디오 불러오는 중...</div>`;
       document.getElementById('previewModal').style.display='flex';
+      const _fb=window._fb;
+      const doPlay=(blobOrUrl, isBlob)=>{
+        const src=isBlob?URL.createObjectURL(blobOrUrl):blobOrUrl;
+        const audio=document.createElement('audio');
+        audio.controls=true; audio.preload='auto';
+        audio.style.cssText='width:100%;margin-bottom:10px;';
+        audio.src=src;
+        body.innerHTML='';
+        body.appendChild(audio);
+        const dl=document.createElement('button');
+        dl.className='modal-btn-primary';dl.style.background='#C8671A';
+        dl.textContent='다운로드 ↓';
+        dl.onclick=()=>window.open(dataUrl,'_blank');
+        body.appendChild(dl);
+        audio.onerror=()=>{
+          body.innerHTML=`<div style="text-align:center;padding:30px;color:#888;font-size:13px;">
+            <div style="margin-bottom:8px;">🎵 ${fileName||'오디오'}</div>
+            <div style="color:#C8671A;margin-bottom:12px;">재생 오류 — 브라우저가 이 형식을 지원하지 않아요</div>
+            <a href="${dataUrl}" target="_blank" style="color:#C8671A;font-weight:700;">새 탭/다른 앱에서 열기 ↗</a>
+          </div>`;
+        };
+      };
+      if(storagePath && _fb && _fb.getBlob && _fb.ref && _fb.storage){
+        // Best path: Firebase SDK getBlob — no CORS issues, works on all networks
+        _fb.getBlob(_fb.ref(_fb.storage, storagePath))
+          .then(blob=>doPlay(blob, true))
+          .catch(()=>{
+            // Fallback: direct URL (works if CORS is configured on Storage)
+            doPlay(dataUrl, false);
+          });
+      } else {
+        // No storagePath stored (old files): try direct URL
+        doPlay(dataUrl, false);
+      }
       return;
     }
   } else {
@@ -1342,7 +1355,7 @@ function renderMemberPage(member,openWeek){
   weekKeys.forEach(mon=>{const fb=feedbacks[mon]||'';const rteEl=document.getElementById(feedbackRteId(mon));if(rteEl&&fb)rteEl.innerHTML=fb;});
 }
 
-function openImgPrev(member,uid,mi){const r=db[member].logs.find(x=>x.uid===uid);const f=(r?.media||[])[mi];if(!f)return;openFilePreview(f.fileUrl||f.data,f.name,f.type);}
+function openImgPrev(member,uid,mi){const r=db[member].logs.find(x=>x.uid===uid);const f=(r?.media||[])[mi];if(!f)return;openFilePreview(f.fileUrl||f.data,f.name,f.type,f.storagePath||'');}
 function toggleWeek(id){const b=document.getElementById(id),t=document.getElementById('toggle_'+id);if(!b)return;b.classList.toggle('open');if(t)t.classList.toggle('open');}
 function deleteMedia(member,uid,mi){
   customConfirm('이 파일을 삭제할까요?',()=>{
