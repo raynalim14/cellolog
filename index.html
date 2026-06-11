@@ -53,9 +53,19 @@ async function uploadFileToStorage(file, storagePath){
   const safeName=(file.name||'file').replace(/[^\w.\-가-힣]/g,'_');
   const path=storagePath+'/'+Date.now()+'_'+safeName;
   const storageRef=ref(storage, path);
-  await uploadBytes(storageRef, file);  // uploadBytes accepts a File/Blob directly
+  // Determine a reliable contentType (some recorders leave file.type empty)
+  let ct=file.type||'';
+  if(!ct){
+    const ext=safeName.split('.').pop().toLowerCase();
+    const extMap={mp3:'audio/mpeg',m4a:'audio/mp4',wav:'audio/wav',ogg:'audio/ogg',
+                  aac:'audio/aac',caf:'audio/x-caf',amr:'audio/amr','3gp':'audio/3gpp',
+                  jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',gif:'image/gif',
+                  webp:'image/webp',pdf:'application/pdf'};
+    ct=extMap[ext]||'application/octet-stream';
+  }
+  await uploadBytes(storageRef, file, {contentType: ct});
   const url=await getDownloadURL(storageRef);
-  return {url, path};
+  return {url, path, contentType: ct};
 }
 
 // Expose to global scope
@@ -869,13 +879,21 @@ function openFilePreview(dataUrl, fileName, explicitType){
       body.innerHTML=`<div style="text-align:center;padding:20px;color:#888;font-size:13px;">🎵 오디오 불러오는 중...</div>`;
       fetch(dataUrl).then(res=>res.blob()).then(blob=>{
         const blobUrl=URL.createObjectURL(blob);
-        body.innerHTML=`<audio controls preload="auto" style="width:100%;margin-bottom:10px;"><source src="${blobUrl}" type="${mime||blob.type}"></audio>`;
-        // re-append download button after replacing innerHTML
+        // Use an <audio> without forcing a type so the browser auto-detects the real codec
+        const audio=document.createElement('audio');
+        audio.controls=true; audio.preload='auto';
+        audio.style.cssText='width:100%;margin-bottom:10px;';
+        audio.src=blobUrl;
+        body.innerHTML='';
+        body.appendChild(audio);
         const dl=document.createElement('button');
         dl.className='modal-btn-primary';dl.style.background='#C8671A';
         dl.textContent='다운로드 ↓';
         dl.onclick=()=>window.open(dataUrl,'_blank');
         body.appendChild(dl);
+        audio.onerror=()=>{
+          body.innerHTML=`<div style="text-align:center;padding:30px;color:#AAA;font-size:13px;">이 오디오 형식은 브라우저에서 재생할 수 없어요.<br>(녹음 앱 형식이 특수할 수 있어요)<br><br><a href="${dataUrl}" target="_blank" style="color:#C8671A;font-weight:700;">새 탭/다른 앱에서 열기 ↗</a></div>`;
+        };
       }).catch(e=>{
         body.innerHTML=`<div style="text-align:center;padding:30px;color:#AAA;font-size:13px;">오디오를 불러올 수 없습니다.<br><br><a href="${dataUrl}" target="_blank" style="color:#C8671A;">새 탭에서 열기</a></div>`;
       });
@@ -1098,6 +1116,7 @@ async function onMediaChange(k){
         const result=await window._fb.uploadFileToStorage(f, 'logs');
         tempEntry.fileUrl=result.url;
         tempEntry.storagePath=result.path;
+        if(result.contentType && !tempEntry.type) tempEntry.type=result.contentType;
         tempEntry.uploading=false;
       }catch(err){
         console.error('Upload failed:',err);
