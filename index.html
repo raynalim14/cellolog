@@ -48,10 +48,19 @@ async function uploadToStorage(dataUrl, fileName, storagePath){
   const url=await getDownloadURL(storageRef);
   return {url, path};  // URL과 경로 둘 다 반환
 }
+// Upload a File/Blob directly to Storage WITHOUT base64 conversion (memory-efficient)
+async function uploadFileToStorage(file, storagePath){
+  const safeName=(file.name||'file').replace(/[^\w.\-가-힣]/g,'_');
+  const path=storagePath+'/'+Date.now()+'_'+safeName;
+  const storageRef=ref(storage, path);
+  await uploadBytes(storageRef, file);  // uploadBytes accepts a File/Blob directly
+  const url=await getDownloadURL(storageRef);
+  return {url, path};
+}
 
 // Expose to global scope
-window._fb = { db_fs, storage, fsGet, fsSet, uploadToStorage, doc, setDoc, getDoc, onSnapshot, ref, getBlob, deleteObject };
-window._fb = { db_fs, storage, fsGet, fsSet, uploadToStorage, doc, setDoc, getDoc, onSnapshot, ref, getBlob, deleteObject };
+window._fb = { db_fs, storage, fsGet, fsSet, uploadToStorage, uploadFileToStorage, doc, setDoc, getDoc, onSnapshot, ref, getBlob, deleteObject };
+window._fb = { db_fs, storage, fsGet, fsSet, uploadToStorage, uploadFileToStorage, doc, setDoc, getDoc, onSnapshot, ref, getBlob, deleteObject };
 // Dispatch event so main script knows Firebase is ready
 document.dispatchEvent(new CustomEvent('fbReady', { detail: window._fb }));
 console.log('✅ Firebase module initialized');
@@ -616,7 +625,7 @@ function normalizeFromFirestore(val) {
   return out;
 }
 
-async function loadFromFirestore(){
+async function loadFromFirestore(silent){
   if(!window._fb) return loadFromLocalStorage();
   const {fsGet}=window._fb;
   try{
@@ -1052,27 +1061,55 @@ function formHTML(k,vals){
   <input type="file" id="mediaInput_${k}" style="display:none;" multiple accept="image/*,audio/*,.pdf,.doc,.docx,.mp3,.m4a,.wav,.ogg,.aac,.caf" onchange="onMediaChange('${k}')">
   <div class="media-preview" id="mediaPrev_${k}">${em.map(f=>f.type&&f.type.startsWith('image/')?`<img src="${f.data}">`:`<span class="mp-file">${f.name}</span>`).join('')}</div>`;
 }
-function onMediaChange(k){
+async function onMediaChange(k){
   const inp=document.getElementById('mediaInput_'+k);
   if(!formMediaFiles[k])formMediaFiles[k]=[];
-  Array.from(inp.files).forEach(f=>{
-    const reader=new FileReader();
-    reader.onload=e=>{
-      formMediaFiles[k].push({name:f.name,data:e.target.result,type:f.type});
+  const files=Array.from(inp.files);
+  inp.value='';  // clear immediately to free the input
+
+  for(const f of files){
+    // Upload directly to Storage via Blob (no base64 in memory) when possible
+    if(window._fb && window._fb.uploadFileToStorage){
+      // show a temporary "uploading" placeholder
+      const tempEntry={name:f.name,type:f.type,fileUrl:'',storagePath:'',data:'',uploading:true};
+      formMediaFiles[k].push(tempEntry);
+      if(k.startsWith('edit_')){ renderEditMediaPreview(k,currentMember); } else { renderFMP(k); }
+      try{
+        const result=await window._fb.uploadFileToStorage(f, 'logs');
+        tempEntry.fileUrl=result.url;
+        tempEntry.storagePath=result.path;
+        tempEntry.uploading=false;
+      }catch(err){
+        console.error('Upload failed:',err);
+        // remove the failed entry
+        const i=formMediaFiles[k].indexOf(tempEntry);
+        if(i>=0) formMediaFiles[k].splice(i,1);
+        customAlert('파일 업로드에 실패했어요. 다시 시도해주세요.');
+      }
       if(k.startsWith('edit_')){
         const uid=k.replace('edit_','');
-        const member=currentMember;
-        renderEditMediaPreview(k,member);
-        updateLogItemMedia(member,uid,formMediaFiles[k]);
+        renderEditMediaPreview(k,currentMember);
+        updateLogItemMedia(currentMember,uid,formMediaFiles[k]);
       } else {
         renderFMP(k);
       }
-    };
-    reader.readAsDataURL(f);
-  });
-  inp.value='';
+    } else {
+      // Fallback (no Firebase): read as base64 (local only)
+      const reader=new FileReader();
+      reader.onload=e=>{
+        formMediaFiles[k].push({name:f.name,data:e.target.result,type:f.type});
+        if(k.startsWith('edit_')){
+          const uid=k.replace('edit_','');
+          renderEditMediaPreview(k,currentMember);
+          updateLogItemMedia(currentMember,uid,formMediaFiles[k]);
+        } else { renderFMP(k); }
+      };
+      reader.readAsDataURL(f);
+    }
+  }
 }
 function renderFMP(k){const p=document.getElementById('mediaPrev_'+k);if(!p)return;p.innerHTML=(formMediaFiles[k]||[]).map(f=>{
+    if(f.uploading) return `<span class="mp-file" style="opacity:0.6;">⏳ ${f.name} 업로드 중...</span>`;
     const src=f.fileUrl||f.data||'';
     return f.type&&f.type.startsWith('image/')?`<img src="${src}">`:`<span class="mp-file">${f.name}</span>`;
   }).join('');}
@@ -1267,58 +1304,34 @@ async function saveEdit(member,uid,mon){
   const idx=db[member].logs.findIndex(x=>x.uid===uid);if(idx<0)return;
   const r=collectLog(ek,[]);
   if(!r.date||r.totalMin<=0){customAlert('날짜와 연습 시간을 확인해주세요.');return;}
-  // Upload any new base64 media to Storage, keep already-uploaded ones
   const rawFiles=formMediaFiles[ek]||[];
-  if(rawFiles.length>0 && window._fb && window._fb.uploadToStorage){
-    const uploaded=[];
-    for(const f of rawFiles){
-      try{
-        if(f.data && f.data.startsWith('data:')){
-          const result=await window._fb.uploadToStorage(f.data, f.name, 'logs/'+member.replace(/\s/g,'_'));
-          uploaded.push({name:f.name,type:f.type,fileUrl:result.url,storagePath:result.path,data:''});
-        } else {
-          uploaded.push(f);
-        }
-      }catch(e){
-        console.error('File upload error:',e);
-        uploaded.push({name:f.name,type:f.type,fileUrl:f.fileUrl||'',storagePath:f.storagePath||'',data:''});
-      }
-    }
-    r.media=uploaded;
-  } else {
-    r.media=rawFiles;
+  if(rawFiles.some(f=>f.uploading)){
+    customAlert('파일 업로드가 끝날 때까지 잠시 기다려주세요.');return;
   }
+  // Files already uploaded by onMediaChange; store URLs only
+  r.media=rawFiles.map(f=>({
+    name:f.name||'', type:f.type||'',
+    fileUrl:f.fileUrl||'', storagePath:f.storagePath||'',
+    data:(f.fileUrl?'':(f.data||''))
+  }));
   r.uid=uid;db[member].logs[idx]=r;save();renderMemberPage(member,mon);
 }
 async function addLog(member){
   const k=member.replace(/\s/g,'');
   const r=collectLog(k,[]);
   if(!r.date||r.totalMin<=0){customAlert('날짜와 연습 시간을 입력해주세요.');return;}
-  r.uid=newUid();
-  // Upload media files to Firebase Storage, store URLs
   const rawFiles=formMediaFiles[k]||[];
-  if(rawFiles.length>0 && window._fb && window._fb.uploadToStorage){
-    const btn=document.querySelector('.add-btn');
-    if(btn){btn.disabled=true;btn.textContent='파일 업로드 중...';}
-    const uploaded=[];
-    for(const f of rawFiles){
-      try{
-        if(f.data && f.data.startsWith('data:')){
-          const result=await window._fb.uploadToStorage(f.data, f.name, 'logs/'+member.replace(/\s/g,'_'));
-          uploaded.push({name:f.name,type:f.type,fileUrl:result.url,storagePath:result.path,data:''});
-        } else {
-          uploaded.push(f);
-        }
-      }catch(e){
-        console.error('File upload error:',e);
-        uploaded.push({name:f.name,type:f.type,fileUrl:'',storagePath:'',data:''});
-      }
-    }
-    r.media=uploaded;
-    if(btn){btn.disabled=false;btn.textContent='✚ 연습 기록 추가';}
-  } else {
-    r.media=rawFiles;
+  // Block save while any file is still uploading
+  if(rawFiles.some(f=>f.uploading)){
+    customAlert('파일 업로드가 끝날 때까지 잠시 기다려주세요.');return;
   }
+  r.uid=newUid();
+  // Files are already uploaded by onMediaChange; clean up and store URLs only
+  r.media=rawFiles.map(f=>({
+    name:f.name||'', type:f.type||'',
+    fileUrl:f.fileUrl||'', storagePath:f.storagePath||'',
+    data:(f.fileUrl?'':(f.data||''))   // keep base64 only if not on Storage
+  }));
   db[member].logs.push(r);
   formMediaFiles[k]=[];
   save();
