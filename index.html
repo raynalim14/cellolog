@@ -1393,6 +1393,11 @@ async function initApp(fb){
   // When app comes back to foreground, refresh data
   document.addEventListener('visibilitychange', async()=>{
     if(document.visibilityState==='visible'){
+      // If user is mid-entry (e.g. just returned from camera/recorder), sync quietly without wiping form
+      if(hasUnsavedFormInput()){
+        await loadFromFirestore(true);
+        return;
+      }
       await loadFromFirestore();
       const homeActive=document.getElementById('screen-home').classList.contains('active');
       const memberActive=document.getElementById('screen-member').classList.contains('active');
@@ -1400,6 +1405,26 @@ async function initApp(fb){
       else if(memberActive) renderMemberPage(currentMember);
     }
   });
+}
+
+// Returns true if the user is actively filling the add-log form (so we shouldn't wipe it)
+function hasUnsavedFormInput(){
+  const memberActive=document.getElementById('screen-member') && document.getElementById('screen-member').classList.contains('active');
+  if(!memberActive) return false;
+  // any editing form open?
+  if(document.querySelector('.inline-edit-form')) return true;
+  // any numeric/text input filled in the add-form?
+  const inputs=document.querySelectorAll('.add-form input, .add-form textarea');
+  for(const el of inputs){
+    if(el.type==='date') continue;  // date auto-fills, ignore
+    if(el.value && el.value!=='0' && el.value.trim()!=='') return true;
+  }
+  // pending media files?
+  if(currentMember){
+    const k=currentMember.replace(/\s/g,'');
+    if((formMediaFiles[k]||[]).length>0) return true;
+  }
+  return false;
 }
 
 function setupRealtimeSync(){
@@ -1423,13 +1448,14 @@ function setupRealtimeSync(){
       if(!Array.isArray(fresh.logs))fresh.logs=[];
       fresh.logs.forEach(r=>{if(!r.uid)r.uid='u'+Math.random().toString(36).slice(2,9);});
       db[m]=fresh;
-      // Re-render whatever screen is currently active
+      // Don't wipe the form if user is mid-entry (e.g. just came back from camera)
+      if(hasUnsavedFormInput()) return;
       const homeActive=document.getElementById('screen-home').classList.contains('active');
       const memberActive=document.getElementById('screen-member').classList.contains('active');
       if(homeActive){
         renderHome();
       } else if(memberActive){
-        renderMemberPage(currentMember); // always re-render current member
+        renderMemberPage(currentMember);
       }
     });
   });
