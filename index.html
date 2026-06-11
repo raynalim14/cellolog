@@ -49,12 +49,34 @@ async function uploadToStorage(dataUrl, fileName, storagePath){
   return {url, path};  // URL과 경로 둘 다 반환
 }
 // Upload a File/Blob directly to Storage WITHOUT base64 conversion (memory-efficient)
+async function detectMime(file){
+  // Sniff the real container from the file's header bytes (ftyp brand for ISO media)
+  try{
+    const head=new Uint8Array(await file.slice(0,16).arrayBuffer());
+    // bytes 4-8 == 'ftyp'
+    if(head[4]===0x66&&head[5]===0x74&&head[6]===0x79&&head[7]===0x70){
+      const brand=String.fromCharCode(head[8],head[9],head[10],head[11]);
+      if(brand.startsWith('3g')) return 'audio/mp4';       // 3GPP container but AAC codec → label as mp4 for max browser support
+      if(brand.startsWith('M4A')||brand.startsWith('mp4')||brand.startsWith('isom')) return 'audio/mp4';
+      if(brand.startsWith('qt')) return 'video/quicktime';
+    }
+    // ID3 or MPEG frame → mp3
+    if(head[0]===0x49&&head[1]===0x44&&head[2]===0x33) return 'audio/mpeg';
+    if(head[0]===0xFF&&(head[1]&0xE0)===0xE0) return 'audio/mpeg';
+    // RIFF/WAVE
+    if(head[0]===0x52&&head[1]===0x49&&head[2]===0x46&&head[3]===0x46) return 'audio/wav';
+    // OggS
+    if(head[0]===0x4F&&head[1]===0x67&&head[2]===0x67&&head[3]===0x53) return 'audio/ogg';
+  }catch(e){}
+  return '';
+}
 async function uploadFileToStorage(file, storagePath){
   const safeName=(file.name||'file').replace(/[^\w.\-가-힣]/g,'_');
   const path=storagePath+'/'+Date.now()+'_'+safeName;
   const storageRef=ref(storage, path);
-  // Determine a reliable contentType (some recorders leave file.type empty)
-  let ct=file.type||'';
+  // Detect real format from header first (handles mislabeled .m4a that are actually 3gp)
+  let ct=await detectMime(file);
+  if(!ct) ct=file.type||'';
   if(!ct){
     const ext=safeName.split('.').pop().toLowerCase();
     const extMap={mp3:'audio/mpeg',m4a:'audio/mp4',wav:'audio/wav',ogg:'audio/ogg',
@@ -877,9 +899,21 @@ function openFilePreview(dataUrl, fileName, explicitType){
     } else {
       // Storage URL — fetch as Blob first so seeking works on long files
       body.innerHTML=`<div style="text-align:center;padding:20px;color:#888;font-size:13px;">🎵 오디오 불러오는 중...</div>`;
-      fetch(dataUrl).then(res=>res.blob()).then(blob=>{
-        const blobUrl=URL.createObjectURL(blob);
-        // Use an <audio> without forcing a type so the browser auto-detects the real codec
+      fetch(dataUrl).then(res=>res.blob()).then(async(blob)=>{
+        // Re-wrap the blob with a browser-friendly MIME based on header sniffing
+        let playType='audio/mp4';
+        try{
+          const head=new Uint8Array(await blob.slice(0,16).arrayBuffer());
+          if(head[4]===0x66&&head[5]===0x74&&head[6]===0x79&&head[7]===0x70){
+            playType='audio/mp4';  // ISO media family (m4a/3gp) with AAC
+          } else if(head[0]===0x49&&head[1]===0x44&&head[2]===0x33){ playType='audio/mpeg'; }
+          else if(head[0]===0xFF&&(head[1]&0xE0)===0xE0){ playType='audio/mpeg'; }
+          else if(head[0]===0x52&&head[1]===0x49&&head[2]===0x46){ playType='audio/wav'; }
+          else if(head[0]===0x4F&&head[1]===0x67&&head[2]===0x67){ playType='audio/ogg'; }
+          else { playType=blob.type||'audio/mp4'; }
+        }catch(e){ playType=blob.type||'audio/mp4'; }
+        const typedBlob=new Blob([blob],{type:playType});
+        const blobUrl=URL.createObjectURL(typedBlob);
         const audio=document.createElement('audio');
         audio.controls=true; audio.preload='auto';
         audio.style.cssText='width:100%;margin-bottom:10px;';
